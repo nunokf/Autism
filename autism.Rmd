@@ -1,0 +1,350 @@
+---
+title: "PREDICTING AUTISM SPECTRUM DISORDER:UNSUPERVISED VS. SUPERVISED METHODS"
+author: "Nuno Fernandes"
+date: '2022-06-08'
+output: github_document
+---
+
+# Introduction
+
+The prediction of the Autism Spectrum Disorder (ASD) has been widely studied, both using unsupervised (Parlett-Pelleriti et al. (2022) for a systematic review) and supervised methods (Karim et al. (2021) for a systematic review).
+
+ASD is a neurodevelopmental disorder characterized by social communication and interaction deficits, and restricted, repetitive patterns of interests and behaviors that become evident in early childhood (APA, 2013).
+
+The objective of the present work was to compare the performance of supervised and unsupervised algorithms on ASD using the data set provided by REVA Academy for Corporate Excellence, REVA University under the Kaagle competition: Autism Prediction Challenge. I expected that supervised methods would show a better performance.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, include = F }
+packages <- c("dplyr", "tibble", "tidyr", "purrr", "FactoMineR", "ggplot2", "lm.beta", "olsrr", "caret", "tidyverse", "reticulate", "factoextra", "MASS", "ggeffects", "effects", "rio", "foreign", "Hmisc","reshape2", "lavaan", "sjPlot","lubridate","caret","mclust","clusterCrit","sjPlot")
+
+installed_packages <- packages %in% row.names(installed.packages())
+if (any(installed_packages == FALSE)) {
+  install.packages(packages[!installed.packages])
+}
+
+lapply(packages, library, character.only = TRUE)
+```
+
+# Preprocessing
+
+#### read csv & train-test split
+
+```{r}
+df = read.csv("train.csv")
+
+## 75% of the sample size
+smp_size <- floor(0.75 * nrow(df))
+
+## set the seed to make your partition reproducible
+set.seed(123)
+train_ind <- sample(seq_len(nrow(df)), size = smp_size)
+
+df <- df[train_ind, ]
+test <- df[-train_ind, ]
+```
+
+```{r}
+head(df)
+```
+
+![](images/paste-630A047C.png)
+
+```{r}
+str(df)
+```
+
+```{r, results=F, warning=F, message=F}
+#train
+df$contry_of_res[df$contry_of_res=="United States"] = "aaaUS"
+
+df$ethnicity[df$ethnicity == "?"] == "Others"
+df$ethnicity[df$ethnicity == "White-European"] = "aaaWhite-European0"
+
+#test
+test$contry_of_res[test$contry_of_res=="United States"] = "aaaUS"
+
+test$ethnicity[test$ethnicity == "?"] == "Others"
+test$ethnicity[test$ethnicity == "White-European"] = "aaaWhite-European0"
+
+cols = c("ID","A1_Score","A2_Score","A3_Score","A4_Score","A5_Score","A6_Score","A7_Score","A8_Score","A9_Score","A10_Score","gender","ethnicity","jaundice","austim","contry_of_res","used_app_before","age_desc","relation","Class.ASD")
+df %>%
+       mutate_each_(funs(factor(.)),cols) -> df
+
+#test
+test %>%
+       mutate_each_(funs(factor(.)),cols) -> test
+```
+
+```{r}
+str(df)
+```
+
+#### Autism Screening Questionnaire (AQ-10)
+
+```{r, results = F}
+df[,2:11]= sapply(df[, 2:11], as.character)
+df[,2:11]= sapply(df[, 2:11], as.numeric)
+
+test[,2:11]= sapply(test[, 2:11], as.character)
+test[,2:11]= sapply(test[, 2:11], as.numeric)
+
+
+df = df %>%rowwise() %>% mutate(scale =sum(c(A1_Score,A2_Score,A3_Score,A4_Score,A5_Score,A6_Score,A7_Score,A8_Score,A9_Score,A10_Score)))
+
+test = test %>% rowwise() %>% mutate(scale =sum(c(A1_Score,A2_Score,A3_Score,A4_Score,A5_Score,A6_Score,A7_Score,A8_Score,A9_Score,A10_Score)))
+
+
+```
+
+#### Plot responses per cluster
+
+```{r}
+fig.labelled_respondents <- df %>% 
+  pivot_longer(cols = cols[2:11], names_to = "question", values_to = "response") %>% 
+  mutate(response = response == 1) %>% 
+  ggplot(aes(x = response, y = question, color = Class.ASD)) +
+  geom_jitter() +
+  theme_bw() +
+  labs(x = "Response", y = "Question", color = "Cluster",
+       title = "Visualization of question responses by cluster")
+
+fig.labelled_respondents
+```
+
+# Unsupervised methods
+
+## K-Means
+
+```{r}
+clustering = kmeans(test[,c("scale")], centers = 2, nstart = 1)
+
+```
+
+#Results to dataframe
+
+```{r}
+cluster = data.frame(clustering$cluster)
+#recode levels
+cluster$clustering.cluster[cluster$clustering.cluster==2] = 0
+cluster$clustering.cluster = as.factor(cluster$clustering.cluster)
+
+```
+
+#### Internal validity
+
+```{r}
+kmeans_internal = intCriteria(as.matrix(test$scale),clustering$cluster,"all")
+```
+
+#### External validity
+
+```{r}
+vector1 = as.vector(as.integer(cluster$clustering.cluster))
+vector2 = as.vector(as.integer(test$Class.ASD))
+
+extCriteria(vector1, vector2,"all")
+```
+
+## Gaussian Mixture Models (GMM)
+
+```{r}
+gmm_test = Mclust(test$scale)
+
+```
+
+#### Density plot
+
+```{r}
+densityMclust(test$scale)
+```
+
+#### Internal validity (Kmeans vs GMM)
+
+```{r}
+gmm_internal = intCriteria(as.matrix(test$scale),as.vector(as.integer(gmm_test$classification)),"all")
+
+new = list()
+
+for (i in 1:length(kmeans_internal)){
+  new = append(new,list(cbind(kmeans_internal[i],gmm_internal[i])))
+}
+
+new
+```
+
+Overall, KMeans showed a greater internal validity compared to GMM.
+
+#### Confusion matrix
+
+```{r}
+classifications = gmm_test$classification
+
+for(i in 1:length(classifications)){
+  if (classifications[i]<= 2){
+    classifications[i] = 0
+  }
+  else {
+    classifications[i] = 1
+  }
+}
+confusionMatrix(test$Class.ASD, factor(classifications))
+```
+
+#### External validity
+
+```{r}
+vector1 = as.vector(as.integer(gmm_test$classification))
+vector2 = as.vector(as.integer(test$Class.ASD))
+
+extCriteria(vector1, vector2,"all")
+```
+
+# Supervised-learning
+
+## LGR
+
+```{r}
+model1 = glm(Class.ASD~age + gender + ethnicity + jaundice + austim + contry_of_res + used_app_before + scale + relation, data=df, family=binomial)
+
+summary(model1)
+```
+
+Selected only sig. predictors.
+
+```{r}
+model2 = glm(Class.ASD~ + ethnicity + jaundice + austim + contry_of_res  + factor(A3_Score)+factor(A4_Score)+factor(A6_Score)+factor(A9_Score) , data=df, family=binomial)
+
+summary(model2)
+```
+
+#### train
+
+```{r}
+pred.prob = predict(model2, type="response")
+pred.prob = ifelse(pred.prob > 0.5, 1, 0)
+table(pred.prob, df$Class.ASD)
+round(mean(pred.prob==df$Class.ASD),2)
+
+```
+
+#### test
+
+```{r}
+pred.prob = predict(model2, newdata= test, type="response")
+pred.prob = ifelse(pred.prob > 0.5, 1, 0)
+table(pred.prob, test$Class.ASD)
+round(mean(pred.prob==test$Class.ASD),2)
+```
+
+#### check mispredicted
+
+```{r}
+cbind(test[c(5,31,38,45,52,66,83),"scale"], test[c(5,31,38,45,52,66,83),"Class.ASD"])
+```
+
+## LDA
+
+```{r}
+lda.model = lda(Class.ASD~ + ethnicity + jaundice + austim + contry_of_res  + factor(A3_Score)+factor(A4_Score)+factor(A6_Score)+factor(A9_Score) , data=df)
+
+```
+
+#### train
+
+```{r}
+predmodel.train.lda = predict(lda.model, data=df)
+table(Predicted=predmodel.train.lda$class, ASD=df$Class.ASD)
+round(mean(predmodel.train.lda$class==df$Class.ASD),2)
+```
+
+#### test
+
+```{r}
+predmodel.test.lda = predict(lda.model, newdata=test)
+table(Predicted=predmodel.test.lda$class, ASD=test$Class.ASD)
+round(mean(predmodel.test.lda$class==test$Class.ASD),2)
+```
+
+## QDA
+
+```{r}
+#qda.model = qda (Class.ASD~ + ethnicity + jaundice + austim + contry_of_res  + scale , data=df)
+
+qda.model = qda (Class.ASD~ + jaundice + austim + scale, data=df)
+
+#qda.model = qda (Class.ASD~ factor(A3_Score)+factor(A4_Score)+factor(A6_Score)+factor(A9_Score) , data=df)
+```
+
+#### train
+
+```{r}
+predmodel.train.qda = predict(qda.model, data=df)
+table(Predicted=predmodel.train.qda$class, ASD=df$Class.ASD)
+round(mean(predmodel.train.qda$class==df$Class.ASD),2)
+```
+
+#### test
+
+```{r}
+predmodel.test.qda = predict(qda.model, newdata=test)
+table(Predicted=predmodel.test.qda$class, ASD=test$Class.ASD)
+round(mean(predmodel.test.qda$class==test$Class.ASD),2)
+```
+
+## Overview
+
+### ROC-Curve
+
+```{r,warning=F,message=FALSE, setup = F}
+library("pROC")
+
+roc_k_means= roc(test$Class.ASD,factor(cluster$clustering.cluster, ordered = T))
+
+roc_gmm_uns = roc(test$Class.ASD, factor(classifications, ordered = T))
+
+roc_lgr = roc(test$Class.ASD,factor(pred.prob, ordered = T))
+
+roc_lda=roc(test$Class.ASD,factor(predmodel.test.lda$class, ordered = T))
+
+roc_qda=roc(test$Class.ASD, factor(predmodel.test.qda$class, ordered = T))
+
+
+
+plot(roc_k_means, col = 'grey',lty = 2)
+
+plot(roc_gmm_uns, add=TRUE, col='black', lty = 2)
+
+plot(roc_lgr, add=TRUE, col='red')
+plot(roc_lda, add=TRUE, col='blue')
+plot(roc_qda, add=TRUE, col='orange')
+
+
+legend("right",
+       inset = 0.01, # Distance from the margin
+       legend = c(paste("Kmeans ", "(AUC = ", round(auc(roc_k_means),2),")" ,sep = ""), paste("GMM ", "(AUC = ", round(auc(roc_gmm_uns),2),")" ,sep = ""),paste("LGR ", "(AUC = ", round(auc(roc_lgr),2),")" ,sep = ""),paste("LDA ", "(AUC = ", round(auc(roc_lda),2),")" ,sep = ""),paste("QDA ", "(AUC = ", round(auc(roc_qda),2),")" ,sep = "")),
+       lty = c(2, 2,1,1,1),
+       col = c("grey","black","red","blue","orange"),
+       lwd = 2)
+
+```
+
+# Discussion
+
+The present findings confirm my initial assumptions. Supervised methods outperformed unsupervised ones. The model that appears to perform best for this classification problem is the logistic regression (AUC = 0.92). Although unsupervised methods showed an inferior performance, they may provide new insights about the data. For example, GMM results suggest that during an initial pre-screening, one should probably classify individuals in 3 classes: no ASD, moderate probability of ASD, and strong probability of ASD. Overall, this work presents a contribution to the ASD prediction.
+
+# References
+
+Pierce, K. (2011). Early functional brain development in autism and the promise of sleep fMRI. Brain Research, 1380, 162-174. <https://doi.org/10.1016/j.brainres.2010.09.028>
+
+American Psychiatric Association. (2013). Diagnostic and statistical manual of mental disorders (5th ed.). <https://doi.org/10.1176/appi.books.9780890425596>
+
+Karim, S., Akter, N., Patwary, M. J. A., Islam, R. (2021). A Review on Predicting Autism Spectrum Disorder(ASD) meltdown using Machine Learning Algorithms. 5th International Conference on Electrical Engineering and Information Communication Technology (ICEEICT) Military Institute of Science and Technology (MIST).
+
+Parlett-Pelleriti, C.M., Stevens, E., Dixon, D. et al. Applications of Unsupervised Machine Learning in Autism Spectrum Disorder Research: a Review. Rev J Autism Dev Disord (2022). <https://doi.org/10.1007/s40489-021-00299-y>
+
+Kashmar, Ali., & Shihab, A. I. (2020). Complexity Analysis of Time Series and Applied Bioinformatics for Monitoring Of Autism Using Neural Network and Statistical Techniques. International Journal of Engineering and Technology.
+
+<https://www.kaggle.com/competitions/autismdiagnosis/data>
